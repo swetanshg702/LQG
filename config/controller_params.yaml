@@ -1,0 +1,4 @@
+controller_node:
+  ros__parameters:
+    # 1x2 LQR gain
+    K_gain: [2.76, 2.51]

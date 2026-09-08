@@ -1,0 +1,16 @@
+# ROS2 / colcon build artifacts
+build/
+install/
+log/
+
+# Recorded bag data (regenerate locally, don't commit)
+*_bag/
+*.db3
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.DS_Store
