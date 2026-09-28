@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+
 using quadrotor_gnc::KalmanFilter;
 
 class EstimatorNode : public rclcpp::Node
@@ -19,37 +20,113 @@ public:
     EstimatorNode()
         : Node("estimator_node")
     {
-        // All KF matrices are now parameters instead of hardcoded values.
-        // Declared as flat, row-major double arrays since rclcpp parameters
-        // don't support matrix types directly.
-        Eigen::Matrix<double, 2, 2> A =
-            declare_matrix2x2("A", {1.0, 0.1, 0.0, 1.0});
+        // ------------------------------------------------------------
+        // Physical parameters
+        // ------------------------------------------------------------
 
-        Eigen::Matrix<double, 2, 1> B =
-            declare_vector2("B", {0.0, 0.1});
+        mass_ =
+            this->declare_parameter<double>("mass", 1.0);
+
+        gravity_ =
+            this->declare_parameter<double>("gravity", 9.81);
+
+        dt_ =
+            this->declare_parameter<double>("dt", 0.1);
+
+
+        // ------------------------------------------------------------
+        // KF matrices
+        // ------------------------------------------------------------
+
+        Eigen::Matrix<double, 2, 2> A =
+            declare_matrix2x2(
+                "A",
+                {
+                    1.0, dt_,
+                    0.0, 1.0
+                });
+
+        // Physical thrust-to-acceleration input matrix:
+        //
+        // B = [ 0      ]
+        //     [ dt / m ]
+        //
+        Eigen::Matrix<double, 2, 1> B;
+
+        B << 0.0,
+             dt_ / mass_;
+
 
         Eigen::Matrix<double, 2, 2> C =
-            declare_matrix2x2("C", {1.0, 0.0, 0.0, 1.0});
+            declare_matrix2x2(
+                "C",
+                {
+                    1.0, 0.0,
+                    0.0, 1.0
+                });
 
         Eigen::Matrix<double, 2, 2> Q =
-            declare_matrix2x2("Q", {0.001, 0.0, 0.0, 0.001});
+            declare_matrix2x2(
+                "Q",
+                {
+                    0.001, 0.0,
+                    0.0, 0.001
+                });
 
         Eigen::Matrix<double, 2, 2> R =
-            declare_matrix2x2("R", {0.05, 0.0, 0.0, 0.05});
+            declare_matrix2x2(
+                "R",
+                {
+                    0.05, 0.0,
+                    0.0, 0.05
+                });
 
         Eigen::Matrix<double, 2, 2> P0 =
-            declare_matrix2x2("P0", {1.0, 0.0, 0.0, 1.0});
+            declare_matrix2x2(
+                "P0",
+                {
+                    1.0, 0.0,
+                    0.0, 1.0
+                });
 
         Eigen::Matrix<double, 2, 1> x0 =
-            declare_vector2("x0", {4.2, 0.7});
+            declare_vector2(
+                "x0",
+                {
+                    4.2,
+                    0.7
+                });
 
-        // declare_parameter/get_parameter need a fully-constructed Node,
-        // so kf_ can't be built in the member-initializer list anymore.
-        // Construct it here in the body instead, once all matrices are known.
-        kf_ = std::make_unique<KalmanFilter>(A, B, C, Q, R, P0, x0);
+
+        // ------------------------------------------------------------
+        // Construct Kalman filter
+        // ------------------------------------------------------------
+
+        kf_ =
+            std::make_unique<KalmanFilter>(
+                A,
+                B,
+                C,
+                Q,
+                R,
+                P0,
+                x0);
+
+
+        // Assume hover thrust until the first control message arrives.
+        //
+        // This avoids starting the KF with an artificial zero-thrust
+        // prediction when the physical plant is expected to hover.
+        u_ = mass_ * gravity_;
+
+
+        // ------------------------------------------------------------
+        // Measurement subscriber
+        // ------------------------------------------------------------
 
         measurement_sub_ =
-            this->create_subscription<quadrotor_gnc::msg::Measurement>(
+            this->create_subscription<
+                quadrotor_gnc::msg::Measurement>(
                 "measurement",
                 10,
                 std::bind(
@@ -57,8 +134,14 @@ public:
                     this,
                     std::placeholders::_1));
 
+
+        // ------------------------------------------------------------
+        // Control subscriber
+        // ------------------------------------------------------------
+
         control_sub_ =
-            this->create_subscription<quadrotor_gnc::msg::Control>(
+            this->create_subscription<
+                quadrotor_gnc::msg::Control>(
                 "control",
                 10,
                 std::bind(
@@ -66,26 +149,48 @@ public:
                     this,
                     std::placeholders::_1));
 
+
+        // ------------------------------------------------------------
+        // Estimated-state publisher
+        // ------------------------------------------------------------
+
         estimate_pub_ =
-            this->create_publisher<quadrotor_gnc::msg::EstimatedState>(
+            this->create_publisher<
+                quadrotor_gnc::msg::EstimatedState>(
                 "estimated_state",
                 10);
+
+
+        // ------------------------------------------------------------
+        // Logging
+        // ------------------------------------------------------------
 
         RCLCPP_INFO(
             this->get_logger(),
             "Estimator node initialized!");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Mass = %.3f kg, Gravity = %.3f m/s^2, dt = %.3f s",
+            mass_,
+            gravity_,
+            dt_);
     }
+
 
 private:
 
-    // Declares a parameter as a flat 4-element row-major double array and
-    // returns it as a 2x2 Eigen matrix. Falls back to `default_vals` (and
-    // logs an error) if the parameter doesn't have exactly 4 elements.
+    // ------------------------------------------------------------
+    // Helper: parameter -> 2x2 Eigen matrix
+    // ------------------------------------------------------------
+
     Eigen::Matrix<double, 2, 2> declare_matrix2x2(
         const std::string & name,
         const std::vector<double> & default_vals)
     {
-        this->declare_parameter<std::vector<double>>(name, default_vals);
+        this->declare_parameter<std::vector<double>>(
+            name,
+            default_vals);
 
         std::vector<double> v =
             this->get_parameter(name).as_double_array();
@@ -94,8 +199,8 @@ private:
         {
             RCLCPP_ERROR(
                 this->get_logger(),
-                "Parameter '%s' must have exactly 4 elements (2x2, "
-                "row-major), got %zu. Falling back to default.",
+                "Parameter '%s' must have exactly 4 elements "
+                "(2x2, row-major), got %zu. Falling back to default.",
                 name.c_str(),
                 v.size());
 
@@ -103,20 +208,25 @@ private:
         }
 
         Eigen::Matrix<double, 2, 2> M;
+
         M << v[0], v[1],
              v[2], v[3];
 
         return M;
     }
 
-    // Declares a parameter as a flat 2-element double array and returns
-    // it as a 2x1 Eigen vector. Falls back to `default_vals` (and logs
-    // an error) if the parameter doesn't have exactly 2 elements.
+
+    // ------------------------------------------------------------
+    // Helper: parameter -> 2x1 Eigen vector
+    // ------------------------------------------------------------
+
     Eigen::Matrix<double, 2, 1> declare_vector2(
         const std::string & name,
         const std::vector<double> & default_vals)
     {
-        this->declare_parameter<std::vector<double>>(name, default_vals);
+        this->declare_parameter<std::vector<double>>(
+            name,
+            default_vals);
 
         std::vector<double> v =
             this->get_parameter(name).as_double_array();
@@ -125,8 +235,8 @@ private:
         {
             RCLCPP_ERROR(
                 this->get_logger(),
-                "Parameter '%s' must have exactly 2 elements, got %zu. "
-                "Falling back to default.",
+                "Parameter '%s' must have exactly 2 elements, "
+                "got %zu. Falling back to default.",
                 name.c_str(),
                 v.size());
 
@@ -134,16 +244,30 @@ private:
         }
 
         Eigen::Matrix<double, 2, 1> vec;
-        vec << v[0], v[1];
+
+        vec << v[0],
+               v[1];
 
         return vec;
     }
+
+
+    // ------------------------------------------------------------
+    // Receives actual thrust command from controller.
+    //
+    // u_ is raw thrust T [N].
+    // ------------------------------------------------------------
 
     void control_callback(
         const quadrotor_gnc::msg::Control & msg)
     {
         u_ = msg.control;
     }
+
+
+    // ------------------------------------------------------------
+    // Measurement callback
+    // ------------------------------------------------------------
 
     void measurement_callback(
         const quadrotor_gnc::msg::Measurement & msg)
@@ -153,14 +277,44 @@ private:
         z << msg.position,
              msg.velocity;
 
-        // Prediction using the most recent control input.
-        kf_->predict(u_);
 
-        // Measurement correction.
+        // --------------------------------------------------------
+        // Convert actual thrust into equivalent deviation input.
+        //
+        // Plant:
+        //
+        // x(k+1) = A*x(k) + B*T + g_vec + w
+        //
+        // Existing KF:
+        //
+        // x(k+1) = A*x(k) + B*u_KF + w
+        //
+        // Therefore:
+        //
+        // u_KF = T - m*g
+        //
+        // --------------------------------------------------------
+
+        double u_kf =
+            u_ - mass_ * gravity_;
+
+
+        // Prediction
+        kf_->predict(u_kf);
+
+
+        // Measurement correction
         kf_->update(z);
 
+
+        // Get state estimate
         const auto & x_hat =
             kf_->getStateEstimate();
+
+
+        // --------------------------------------------------------
+        // Publish estimated state
+        // --------------------------------------------------------
 
         auto estimate =
             quadrotor_gnc::msg::EstimatedState();
@@ -170,12 +324,25 @@ private:
 
         estimate_pub_->publish(estimate);
 
+
+        // --------------------------------------------------------
+        // Logging
+        // --------------------------------------------------------
+
         RCLCPP_INFO(
             this->get_logger(),
-            "Estimate: position = %.3f, velocity = %.3f",
+            "Estimate: position = %.3f, velocity = %.3f | "
+            "Thrust = %.3f N | KF input = %.3f",
             estimate.position,
-            estimate.velocity);
+            estimate.velocity,
+            u_,
+            u_kf);
     }
+
+
+    // ------------------------------------------------------------
+    // ROS2 interfaces
+    // ------------------------------------------------------------
 
     rclcpp::Subscription<
         quadrotor_gnc::msg::Measurement
@@ -189,10 +356,27 @@ private:
         quadrotor_gnc::msg::EstimatedState
     >::SharedPtr estimate_pub_;
 
+
+    // ------------------------------------------------------------
+    // Kalman filter
+    // ------------------------------------------------------------
+
     std::unique_ptr<KalmanFilter> kf_;
 
-    double u_ = 0.0;
+
+    // ------------------------------------------------------------
+    // Physical parameters
+    // ------------------------------------------------------------
+
+    double mass_;
+    double gravity_;
+    double dt_;
+
+
+    // Most recently received actual thrust [N]
+    double u_;
 };
+
 
 int main(int argc, char * argv[])
 {

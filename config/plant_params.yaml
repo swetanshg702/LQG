@@ -8,3 +8,6 @@ plant_node:
     Q: [0.001, 0.0, 0.0, 0.001]
     # 2x2, row-major -- measurement noise covariance
     R: [0.05, 0.0, 0.0, 0.05]
+    mass: 1.0
+    gravity: 9.81
+
